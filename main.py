@@ -1,12 +1,19 @@
 import mediapipe as mp
-print("MEDIAPIPE VERSION:", getattr(mp, "__version__", "unknown"))
-print("HAS mp.solutions?:", hasattr(mp, "solutions"))
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
 import cv2
 
 
 app = FastAPI()
+
+# 2️⃣ Health & root endpoint'leri (BURAYA EKLENECEK)
+@app.get("/")
+def root():
+    return {"ok": True, "service": "face-mesh"}
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 mp_face_mesh = mp.solutions.face_mesh
 mesh = mp_face_mesh.FaceMesh(
