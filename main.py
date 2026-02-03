@@ -1,7 +1,10 @@
+import mediapipe as mp
+print("MEDIAPIPE VERSION:", getattr(mp, "__version__", "unknown"))
+print("HAS mp.solutions?:", hasattr(mp, "solutions"))
 from fastapi import FastAPI, UploadFile, File
 import numpy as np
 import cv2
-import mediapipe as mp
+
 
 app = FastAPI()
 
