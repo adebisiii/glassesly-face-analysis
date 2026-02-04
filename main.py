@@ -1,16 +1,15 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import cv2
 import mediapipe as mp
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 # =========================
 # FastAPI APP
 # =========================
-app = FastAPI(title="Face Analysis API", version="2.0.0")
+app = FastAPI(title="Face Analysis API", version="2.1.0")
 
-# CORS (Next.js için pratik)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # prod'da domain'e indir
@@ -37,7 +36,7 @@ mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=True,
     max_num_faces=1,
-    refine_landmarks=True,
+    refine_landmarks=True,          # iris + daha detaylı göz/lip
     min_detection_confidence=0.5
 )
 
@@ -62,12 +61,13 @@ def bbox_from_points(points: Dict[str, Optional[List[float]]], w: int, h: int) -
         return None
     x1, x2 = float(min(xs)), float(max(xs))
     y1, y2 = float(min(ys)), float(max(ys))
-    # clamp
-    x1 = clamp(x1, 0.0, float(w-1))
-    x2 = clamp(x2, 0.0, float(w-1))
-    y1 = clamp(y1, 0.0, float(h-1))
-    y2 = clamp(y2, 0.0, float(h-1))
-    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "w": x2-x1, "h": y2-y1}
+
+    x1 = clamp(x1, 0.0, float(w - 1))
+    x2 = clamp(x2, 0.0, float(w - 1))
+    y1 = clamp(y1, 0.0, float(h - 1))
+    y2 = clamp(y2, 0.0, float(h - 1))
+
+    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "w": x2 - x1, "h": y2 - y1}
 
 def compute_image_quality(bgr: np.ndarray, bbox: Optional[Dict[str, float]]) -> Dict[str, Any]:
     """
@@ -188,11 +188,40 @@ def estimate_pose_flags(landmarks_px: Dict[str, Optional[List[float]]]) -> Dict[
 
     return flags
 
+def build_full_mesh(face_landmarks, w: int, h: int, mode: str) -> List[List[float]]:
+    """
+    mode:
+      - "norm2": [x,y] normalized
+      - "norm3": [x,y,z] normalized
+      - "px2"  : [x_px,y_px]
+      - "px3"  : [x_px,y_px,z]  (z normalized kalır; px'e çevirmek anlamsız olur)
+    """
+    mesh: List[List[float]] = []
+    for lm in face_landmarks:
+        if mode == "norm2":
+            mesh.append([float(lm.x), float(lm.y)])
+        elif mode == "norm3":
+            mesh.append([float(lm.x), float(lm.y), float(lm.z)])
+        elif mode == "px2":
+            mesh.append([float(lm.x * w), float(lm.y * h)])
+        elif mode == "px3":
+            mesh.append([float(lm.x * w), float(lm.y * h), float(lm.z)])
+        else:
+            mesh.append([float(lm.x), float(lm.y), float(lm.z)])
+    return mesh
+
 # =========================
 # API Endpoint
 # =========================
 @app.post("/v1/face-mesh")
-async def face_mesh_endpoint(file: UploadFile = File(...)):
+async def face_mesh_endpoint(
+    file: UploadFile = File(...),
+    # full mesh döndürmek için:
+    return_mesh: int = Query(1, description="1 ise full mesh döner, 0 ise dönmez"),
+    # mesh formatı:
+    # norm2/norm3/px2/px3
+    mesh_mode: str = Query("norm3", description="norm2|norm3|px2|px3"),
+):
     data = await file.read()
     img_arr = np.frombuffer(data, np.uint8)
     bgr = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
@@ -209,19 +238,19 @@ async def face_mesh_endpoint(file: UploadFile = File(...)):
             "ok": True,
             "image": {"w": w, "h": h},
             "confidence": 0,
+            "mesh": None,
             "landmarks": None,
             "bbox": None,
             "quality": None,
             "pose": None
         }
 
-    face = result.multi_face_landmarks[0].landmark
+    face = result.multi_face_landmarks[0].landmark  # 468 veya refine ile 478
 
-    # ✅ Daha sağlam landmark seti
-    # - göz: inner corners + outer corners
-    # - burun: nostril outer + nose tip
-    # - yüz genişliği: temple (şakak)
-    # - yükseklik: forehead + chin
+    # Full mesh (opsiyonel)
+    mesh = build_full_mesh(face, w, h, mesh_mode) if return_mesh == 1 else None
+
+    # “Özet” noktalar (istersen tut, istemezsen kaldırabilirsin)
     idx = {
         "LE_IN": 133,
         "RE_IN": 362,
@@ -251,7 +280,6 @@ async def face_mesh_endpoint(file: UploadFile = File(...)):
     quality = compute_image_quality(bgr, bbox)
     pose = estimate_pose_flags(landmarks_px)
 
-    # Basit quality flags
     quality_flags = {
         "too_blurry": quality["lap_var"] is not None and quality["lap_var"] < 40,
         "too_dark": quality["mean_brightness"] is not None and quality["mean_brightness"] < 55,
@@ -264,7 +292,13 @@ async def face_mesh_endpoint(file: UploadFile = File(...)):
     return {
         "ok": True,
         "image": {"w": w, "h": h},
-        "landmarks": landmarks_px,
+        "mesh_meta": {
+            "count": len(face),
+            "refine_landmarks": True,
+            "mode": mesh_mode
+        },
+        "mesh": mesh,                 # ✅ full mesh burada
+        "landmarks": landmarks_px,     # (özet noktalar)
         "bbox": bbox,
         "quality": quality,
         "pose": pose,
